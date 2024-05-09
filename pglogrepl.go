@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgconn"
 	"github.com/jackc/pgio"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/jackc/pgproto3/v2"
 )
 
 const (
@@ -319,8 +319,11 @@ func StartReplication(ctx context.Context, conn *pgconn.PgConn, slotName string,
 		sql += timelineString
 	}
 
-	conn.Frontend().SendQuery(&pgproto3.Query{String: sql})
-	err := conn.Frontend().Flush()
+	buf, err := (&pgproto3.Query{String: sql}).Encode(nil)
+	if err != nil {
+		return fmt.Errorf("failed to encode START_REPLICATION: %w", err)
+	}
+	err = conn.SendBytes(ctx, buf)
 	if err != nil {
 		return fmt.Errorf("failed to send START_REPLICATION: %w", err)
 	}
@@ -469,9 +472,11 @@ func StartBaseBackup(ctx context.Context, conn *pgconn.PgConn, options BaseBacku
 		return result, err
 	}
 	sql := options.sql(serverVersion)
-
-	conn.Frontend().SendQuery(&pgproto3.Query{String: sql})
-	err = conn.Frontend().Flush()
+	buf, err := (&pgproto3.Query{String: sql}).Encode(nil)
+	if err != nil {
+		return result, fmt.Errorf("failed to encode BASE_BACKEND: %w", err)
+	}
+	err = conn.SendBytes(ctx, buf)
 	if err != nil {
 		return result, fmt.Errorf("failed to send BASE_BACKUP: %w", err)
 	}
@@ -712,7 +717,7 @@ type StandbyStatusUpdate struct {
 // The only required field in ssu is WALWritePosition. If WALFlushPosition is 0 then WALWritePosition will be assigned
 // to it. If WALApplyPosition is 0 then WALWritePosition will be assigned to it. If ClientTime is the zero value then
 // the current time will be assigned to it.
-func SendStandbyStatusUpdate(_ context.Context, conn *pgconn.PgConn, ssu StandbyStatusUpdate) error {
+func SendStandbyStatusUpdate(ctx context.Context, conn *pgconn.PgConn, ssu StandbyStatusUpdate) error {
 	if ssu.WALFlushPosition == 0 {
 		ssu.WALFlushPosition = ssu.WALWritePosition
 	}
@@ -741,7 +746,7 @@ func SendStandbyStatusUpdate(_ context.Context, conn *pgconn.PgConn, ssu Standby
 		return err
 	}
 
-	return conn.Frontend().SendUnbufferedEncodedCopyData(buf)
+	return conn.SendBytes(ctx, buf)
 }
 
 // CopyDoneResult is the parsed result as returned by the server after the client
@@ -753,18 +758,21 @@ type CopyDoneResult struct {
 
 // SendStandbyCopyDone sends a StandbyCopyDone to the PostgreSQL server
 // to confirm ending the copy-both mode.
-func SendStandbyCopyDone(_ context.Context, conn *pgconn.PgConn) (cdr *CopyDoneResult, err error) {
+func SendStandbyCopyDone(ctx context.Context, conn *pgconn.PgConn) (cdr *CopyDoneResult, err error) {
 	// I am suspicious that this is wildly wrong, but I'm pretty sure the previous
 	// code was wildly wrong too -- wttw <steve@blighty.com>
-	conn.Frontend().Send(&pgproto3.CopyDone{})
-	err = conn.Frontend().Flush()
+	buf, err := (&pgproto3.CopyDone{}).Encode(nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode START_REPLICATION: %w", err)
+	}
+	err = conn.SendBytes(ctx, buf)
 	if err != nil {
 		return
 	}
 
 	for {
 		var msg pgproto3.BackendMessage
-		msg, err = conn.Frontend().Receive()
+		msg, err = conn.ReceiveMessage(ctx)
 		if err != nil {
 			return cdr, err
 		}
