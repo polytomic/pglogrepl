@@ -401,23 +401,38 @@ type TupleData struct {
 func (m *TupleData) Decode(src []byte) (int, error) {
 	var low, used int
 
+	if len(src) < 2 {
+		return 0, m.lengthError("TupleData", 2, len(src))
+	}
 	m.ColumnNum, used = m.decodeUint16(src)
 	low += used
 
+	if m.Columns == nil {
+		m.Columns = make([]*TupleDataColumn, 0, m.ColumnNum)
+	}
 	for i := 0; i < int(m.ColumnNum); i++ {
+		if low >= len(src) {
+			return low, m.lengthError("TupleData", low+1, len(src))
+		}
 		column := new(TupleDataColumn)
 		column.DataType = src[low]
 		low += 1
 
 		switch column.DataType {
 		case TupleDataTypeText, TupleDataTypeBinary:
+			if len(src)-low < 4 {
+				return low, m.lengthError("TupleData", low+4, len(src))
+			}
 			column.Length, used = m.decodeUint32(src[low:])
 			low += used
 
-			column.Data = make([]byte, int(column.Length))
-			for j := 0; j < int(column.Length); j++ {
-				column.Data[j] = src[low+j]
+			if uint64(len(src)-low) < uint64(column.Length) {
+				return low, m.lengthError("TupleData", low+int(column.Length), len(src))
 			}
+			// src is the connection's read buffer, which is reused, so the
+			// column data must be copied rather than sliced.
+			column.Data = make([]byte, int(column.Length))
+			copy(column.Data, src[low:])
 			low += int(column.Length)
 		case TupleDataTypeNull, TupleDataTypeToast:
 		}

@@ -846,3 +846,68 @@ func (s *logicalDecodingMessageSuite) Test() {
 
 	s.Equal(expected, logicalDecodingMsg)
 }
+
+// encodeTupleData builds a TupleData wire payload from text columns; nil
+// entries are encoded as NULL.
+func encodeTupleData(cols [][]byte) []byte {
+	buf := make([]byte, 2)
+	bigEndian.PutUint16(buf, uint16(len(cols)))
+	for _, c := range cols {
+		if c == nil {
+			buf = append(buf, TupleDataTypeNull)
+			continue
+		}
+		buf = append(buf, TupleDataTypeText, 0, 0, 0, 0)
+		bigEndian.PutUint32(buf[len(buf)-4:], uint32(len(c)))
+		buf = append(buf, c...)
+	}
+	return buf
+}
+
+func TestTupleDataDecodeCopiesColumns(t *testing.T) {
+	cols := [][]byte{[]byte("1"), nil, []byte("hello world"), {}}
+	src := encodeTupleData(cols)
+
+	var td TupleData
+	n, err := td.Decode(src)
+	require.NoError(t, err)
+	require.Equal(t, len(src), n)
+	require.Len(t, td.Columns, len(cols))
+	require.Equal(t, uint8(TupleDataTypeNull), td.Columns[1].DataType)
+	require.Equal(t, []byte("hello world"), td.Columns[2].Data)
+	require.Equal(t, []byte{}, td.Columns[3].Data)
+
+	// Column data must not alias src, which callers reuse.
+	for i := range src {
+		src[i] = 0
+	}
+	require.Equal(t, []byte("1"), td.Columns[0].Data)
+	require.Equal(t, []byte("hello world"), td.Columns[2].Data)
+}
+
+func TestTupleDataDecodeTruncated(t *testing.T) {
+	src := encodeTupleData([][]byte{[]byte("hello world")})
+	var td TupleData
+	_, err := td.Decode(src[:len(src)-3])
+	require.Error(t, err)
+}
+
+func BenchmarkTupleDataDecode(b *testing.B) {
+	large := make([]byte, 160*1024)
+	for i := range large {
+		large[i] = byte('a' + i%26)
+	}
+	src := encodeTupleData([][]byte{
+		[]byte("12345"), []byte("2026-11-13 00:00:00+00"), nil,
+		large, large, large,
+	})
+	b.SetBytes(int64(len(src)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var td TupleData
+		if _, err := td.Decode(src); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
